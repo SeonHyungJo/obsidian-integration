@@ -93,100 +93,130 @@ export class MyBaseClient implements Client {
 		requestConfig: RequestConfig,
 		callback: Callback<T> | never,
 	): Promise<void | T> {
-		try {
-			const contentType = (requestConfig.headers ?? {})[
-				"content-type"
-			]?.toString();
-			if (requestConfig.headers && contentType) {
-				requestConfig.headers["Content-Type"] = contentType;
-				delete requestConfig?.headers["content-type"];
+		const MAX_RETRIES = 3;
+		const BASE_RETRY_DELAY_MS = 5000;
+
+		for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+			try {
+				const contentType = (requestConfig.headers ?? {})[
+					"content-type"
+				]?.toString();
+				if (requestConfig.headers && contentType) {
+					requestConfig.headers["Content-Type"] = contentType;
+					delete requestConfig?.headers["content-type"];
+				}
+
+				const params = this.paramSerializer(requestConfig.params);
+
+				const requestContentType =
+					(requestConfig.headers ?? {})["Content-Type"]?.toString() ??
+					"application/json";
+
+				const requestBody = requestContentType.startsWith(
+					"multipart/form-data",
+				)
+					? [
+							requestConfig.data.getHeaders(),
+							requestConfig.data.getBuffer().buffer,
+					  ]
+					: [{}, JSON.stringify(requestConfig.data)];
+
+				const modifiedRequestConfig = {
+					...requestConfig,
+					headers: this.removeUndefinedProperties({
+						"User-Agent": "Obsidian.md",
+						Accept: "application/json",
+						[ATLASSIAN_TOKEN_CHECK_FLAG]: this.config
+							.noCheckAtlassianToken
+							? ATLASSIAN_TOKEN_CHECK_NOCHECK_VALUE
+							: undefined,
+						...this.config.baseRequestConfig?.headers,
+						Authorization:
+							await AuthenticationService.getAuthenticationToken(
+								this.config.authentication,
+								{
+									// eslint-disable-next-line @typescript-eslint/naming-convention
+									baseURL: this.config.host,
+									url: `${this.config.host}${this.urlSuffix}`,
+									method: requestConfig.method ?? "GET",
+								},
+							),
+						...requestConfig.headers,
+						"Content-Type": requestContentType,
+						...requestBody[0],
+					}),
+					url: `${this.config.host}${this.urlSuffix}${requestConfig.url}?${params}`,
+					body: requestBody[1],
+					method: requestConfig.method?.toUpperCase() ?? "GET",
+					contentType: requestContentType,
+					throw: false,
+				};
+				delete modifiedRequestConfig.data;
+
+				const response = await requestUrl(modifiedRequestConfig);
+
+				if (response.status === 429) {
+					if (attempt < MAX_RETRIES) {
+						const delay = BASE_RETRY_DELAY_MS * Math.pow(2, attempt);
+						console.warn(
+							`Rate limited (429). Retrying in ${delay / 1000}s (attempt ${attempt + 1}/${MAX_RETRIES})`,
+						);
+						await new Promise((resolve) => setTimeout(resolve, delay));
+						continue;
+					}
+					throw new HTTPError(`Rate limited after ${MAX_RETRIES} retries`, {
+						status: response.status,
+						data: response.text,
+					});
+				}
+
+				if (response.status >= 400) {
+					throw new HTTPError(`Received a ${response.status}`, {
+						status: response.status,
+						data: response.text,
+					});
+				}
+
+				const callbackResponseHandler =
+					callback && ((data: T): void => callback(null, data));
+				const defaultResponseHandler = (data: T): T => data;
+
+				const responseHandler =
+					callbackResponseHandler ?? defaultResponseHandler;
+
+				let responseJson: T;
+				try {
+					responseJson = response.json;
+				} catch {
+					responseJson = undefined as unknown as T;
+				}
+
+				this.config.middlewares?.onResponse?.(responseJson);
+
+				return responseHandler(responseJson);
+				// eslint-disable-next-line @typescript-eslint/no-explicit-any
+			} catch (e: any) {
+				if (e instanceof HTTPError && e.response.status === 429 && attempt < MAX_RETRIES) {
+					continue;
+				}
+				console.warn({ httpError: e, requestConfig });
+				const err =
+					this.config.newErrorHandling && e.isAxiosError
+						? e.response.data
+						: e;
+
+				const callbackErrorHandler =
+					callback && ((error: Config.Error) => callback(error));
+				const defaultErrorHandler = (error: Error) => {
+					throw error;
+				};
+
+				const errorHandler = callbackErrorHandler ?? defaultErrorHandler;
+
+				this.config.middlewares?.onError?.(err);
+
+				return errorHandler(err);
 			}
-
-			const params = this.paramSerializer(requestConfig.params);
-
-			const requestContentType =
-				(requestConfig.headers ?? {})["Content-Type"]?.toString() ??
-				"application/json";
-
-			const requestBody = requestContentType.startsWith(
-				"multipart/form-data",
-			)
-				? [
-						requestConfig.data.getHeaders(),
-						requestConfig.data.getBuffer().buffer,
-				  ]
-				: [{}, JSON.stringify(requestConfig.data)];
-
-			const modifiedRequestConfig = {
-				...requestConfig,
-				headers: this.removeUndefinedProperties({
-					"User-Agent": "Obsidian.md",
-					Accept: "application/json",
-					[ATLASSIAN_TOKEN_CHECK_FLAG]: this.config
-						.noCheckAtlassianToken
-						? ATLASSIAN_TOKEN_CHECK_NOCHECK_VALUE
-						: undefined,
-					...this.config.baseRequestConfig?.headers,
-					Authorization:
-						await AuthenticationService.getAuthenticationToken(
-							this.config.authentication,
-							{
-								// eslint-disable-next-line @typescript-eslint/naming-convention
-								baseURL: this.config.host,
-								url: `${this.config.host}${this.urlSuffix}`,
-								method: requestConfig.method ?? "GET",
-							},
-						),
-					...requestConfig.headers,
-					"Content-Type": requestContentType,
-					...requestBody[0],
-				}),
-				url: `${this.config.host}${this.urlSuffix}${requestConfig.url}?${params}`,
-				body: requestBody[1],
-				method: requestConfig.method?.toUpperCase() ?? "GET",
-				contentType: requestContentType,
-				throw: false,
-			};
-			delete modifiedRequestConfig.data;
-
-			const response = await requestUrl(modifiedRequestConfig);
-
-			if (response.status >= 400) {
-				throw new HTTPError(`Received a ${response.status}`, {
-					status: response.status,
-					data: response.text,
-				});
-			}
-
-			const callbackResponseHandler =
-				callback && ((data: T): void => callback(null, data));
-			const defaultResponseHandler = (data: T): T => data;
-
-			const responseHandler =
-				callbackResponseHandler ?? defaultResponseHandler;
-
-			this.config.middlewares?.onResponse?.(response.json);
-
-			return responseHandler(response.json);
-			// eslint-disable-next-line @typescript-eslint/no-explicit-any
-		} catch (e: any) {
-			console.warn({ httpError: e, requestConfig });
-			const err =
-				this.config.newErrorHandling && e.isAxiosError
-					? e.response.data
-					: e;
-
-			const callbackErrorHandler =
-				callback && ((error: Config.Error) => callback(error));
-			const defaultErrorHandler = (error: Error) => {
-				throw error;
-			};
-
-			const errorHandler = callbackErrorHandler ?? defaultErrorHandler;
-
-			this.config.middlewares?.onError?.(err);
-
-			return errorHandler(err);
 		}
 	}
 }
