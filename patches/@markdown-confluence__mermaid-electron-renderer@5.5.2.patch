@@ -1,0 +1,25 @@
+diff --git a/dist/index.js b/dist/index.js
+index 3eef2080edcadfebb1dde10b2b8a0c6e98135674..456bab320c0ee90177e0afaaeaad76969302a41c 100644
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -38,7 +38,9 @@ export class ElectronMermaidRenderer {
+             mermaidRenderHtml = URL.createObjectURL(this.getFileContentBlob(this.extraStyleSheets, this.extraStyles, this.bodyClasses));
+         }
+         const capturedCharts = new Map();
+-        const promises = charts.map(async (chart) => {
++        // fork patch: render one chart window at a time. The original opened a BrowserWindow per
++        // diagram concurrently (Promise.all), which spiked renderer/DOM memory and could OOM-crash.
++        for (const chart of charts) {
+             const debug = false;
+             const chartWindow = new BrowserWindow({
+                 width: 800,
+@@ -76,8 +78,7 @@ export class ElectronMermaidRenderer {
+                     chartWindow.close();
+                 }
+             }
+-        });
+-        await Promise.all(promises);
++        }
+         return capturedCharts;
+     }
+     getFileContentBlob(extraStyleSheets, extraStyles, bodyClasses) {

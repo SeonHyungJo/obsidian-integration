@@ -173,3 +173,23 @@ index 1afe77891789bc64635bddc1ba5fa1cb721e3373..a5903d8e1d6d5d3a626b3183d4d2392a
          }
      }
      const searchParams = {
+diff --git a/dist/TreeLocal.js b/dist/TreeLocal.js
+index 63a1cc66ee26beff4ab81df8eac26f76dfcd028c..88c51ff15733a9def2b477a8510dae593e1b9cf3 100644
+--- a/dist/TreeLocal.js
++++ b/dist/TreeLocal.js
+@@ -74,7 +74,14 @@ const processNode = (commonPath, node) => {
+     node.children.forEach((childNode) => processNode(childCommonPath, childNode));
+ };
+ export const createFolderStructure = (markdownFiles, settings) => {
+-    const commonPath = findCommonPath(markdownFiles.map((file) => file.absoluteFilePath));
++    // fork patch: anchor the tree at folderToPublish so a partial/batched set of files nests the
++    // same way a full publish would. findCommonPath of a subset can root too deep (e.g. inside a
++    // single folder), which would reparent those pages directly under the Confluence root.
++    const allUnderPublishRoot = settings.folderToPublish &&
++        markdownFiles.every((file) => file.absoluteFilePath.startsWith(settings.folderToPublish));
++    const commonPath = allUnderPublishRoot
++        ? settings.folderToPublish
++        : findCommonPath(markdownFiles.map((file) => file.absoluteFilePath));
+     const rootNode = createTreeNode(commonPath);
+     markdownFiles.forEach((file) => {
+         const relativePath = path.relative(commonPath, file.absoluteFilePath);

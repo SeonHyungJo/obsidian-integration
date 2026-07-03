@@ -171,8 +171,8 @@ export default class ConfluencePlugin extends Plugin {
 		};
 	}
 
-	async doPublish(publishFilter?: string): Promise<UploadResults> {
-		const adrFiles = await this.publisher.publish(publishFilter);
+	async doPublish(): Promise<UploadResults> {
+		const adrFiles = await this.publisher.publish();
 
 		const returnVal: UploadResults = {
 			errorMessage: null,
@@ -197,82 +197,82 @@ export default class ConfluencePlugin extends Plugin {
 		return returnVal;
 	}
 
+	// Publish the given paths in bounded batches. Converting every file to ADF at once
+	// exhausts the renderer heap on large vaults, so we process a slice at a time and let
+	// each batch's memory be released before the next.
+	private static readonly BATCH_SIZE = 10;
+
+	async doPublishPaths(paths: string[]): Promise<UploadResults> {
+		const aggregate: UploadResults = {
+			errorMessage: null,
+			failedFiles: [],
+			filesUploadResult: [],
+		};
+		try {
+			for (let i = 0; i < paths.length; i += ConfluencePlugin.BATCH_SIZE) {
+				const batch = paths.slice(i, i + ConfluencePlugin.BATCH_SIZE);
+				this.adaptor.publishTargetPaths = new Set(batch);
+				const done = Math.min(i + batch.length, paths.length);
+				new Notice(`Confluence: publishing ${done}/${paths.length}…`);
+				const stats = await this.doPublish();
+				aggregate.failedFiles.push(...stats.failedFiles);
+				aggregate.filesUploadResult.push(...stats.filesUploadResult);
+			}
+		} finally {
+			this.adaptor.publishTargetPaths = null;
+		}
+		return aggregate;
+	}
+
+	private showResults(uploadResults: UploadResults) {
+		new CompletedModal(this.app, { uploadResults }).open();
+	}
+
+	private showError(error: unknown) {
+		this.showResults({
+			errorMessage:
+				error instanceof Error ? error.message : JSON.stringify(error),
+			failedFiles: [],
+			filesUploadResult: [],
+		});
+	}
+
+	private async runPublish(run: () => Promise<UploadResults>) {
+		if (this.isSyncing) {
+			new Notice("Syncing already on going");
+			return;
+		}
+		this.isSyncing = true;
+		try {
+			this.showResults(await run());
+		} catch (error) {
+			this.showError(error);
+		} finally {
+			this.isSyncing = false;
+		}
+	}
+
 	override async onload() {
 		await this.init();
 
-		this.addRibbonIcon("cloud", "Publish to Confluence", async () => {
-			if (this.isSyncing) {
-				new Notice("Syncing already on going");
-				return;
-			}
-			this.isSyncing = true;
-			try {
-				const stats = await this.doPublish();
-				new CompletedModal(this.app, {
-					uploadResults: stats,
-				}).open();
-			} catch (error) {
-				if (error instanceof Error) {
-					new CompletedModal(this.app, {
-						uploadResults: {
-							errorMessage: error.message,
-							failedFiles: [],
-							filesUploadResult: [],
-						},
-					}).open();
-				} else {
-					new CompletedModal(this.app, {
-						uploadResults: {
-							errorMessage: JSON.stringify(error),
-							failedFiles: [],
-							filesUploadResult: [],
-						},
-					}).open();
-				}
-			} finally {
-				this.isSyncing = false;
-			}
+		this.addRibbonIcon("cloud", "Publish to Confluence", () => {
+			this.runPublish(() =>
+				this.doPublishPaths(this.adaptor.listPublishTargetPaths()),
+			);
 		});
 
 		this.addCommand({
 			id: "publish-current",
 			name: "Publish Current File to Confluence",
 			checkCallback: (checking: boolean) => {
-				if (!this.isSyncing) {
-					if (!checking) {
-						this.isSyncing = true;
-						this.doPublish(this.activeLeafPath(this.workspace))
-							.then((stats) => {
-								new CompletedModal(this.app, {
-									uploadResults: stats,
-								}).open();
-							})
-							.catch((error) => {
-								if (error instanceof Error) {
-									new CompletedModal(this.app, {
-										uploadResults: {
-											errorMessage: error.message,
-											failedFiles: [],
-											filesUploadResult: [],
-										},
-									}).open();
-								} else {
-									new CompletedModal(this.app, {
-										uploadResults: {
-											errorMessage: JSON.stringify(error),
-											failedFiles: [],
-											filesUploadResult: [],
-										},
-									}).open();
-								}
-							})
-							.finally(() => {
-								this.isSyncing = false;
-							});
-					}
-					return true;
+				const activePath = this.activeLeafPath(this.workspace);
+				if (this.isSyncing || !activePath) {
+					return false;
 				}
-				return false;
+				if (!checking) {
+					this.runPublish(() => this.doPublishPaths([activePath]));
+				}
+				return true;
 			},
 		});
 
@@ -280,40 +280,17 @@ export default class ConfluencePlugin extends Plugin {
 			id: "publish-all",
 			name: "Publish All to Confluence",
 			checkCallback: (checking: boolean) => {
-				if (!this.isSyncing) {
-					if (!checking) {
-						this.isSyncing = true;
-						this.doPublish()
-							.then((stats) => {
-								new CompletedModal(this.app, {
-									uploadResults: stats,
-								}).open();
-							})
-							.catch((error) => {
-								if (error instanceof Error) {
-									new CompletedModal(this.app, {
-										uploadResults: {
-											errorMessage: error.message,
-											failedFiles: [],
-											filesUploadResult: [],
-										},
-									}).open();
-								} else {
-									new CompletedModal(this.app, {
-										uploadResults: {
-											errorMessage: JSON.stringify(error),
-											failedFiles: [],
-											filesUploadResult: [],
-										},
-									}).open();
-								}
-							})
-							.finally(() => {
-								this.isSyncing = false;
-							});
-					}
+				if (this.isSyncing) {
+					return false;
 				}
-				return !this.isSyncing;
+				if (!checking) {
+					this.runPublish(() =>
+						this.doPublishPaths(
+							this.adaptor.listPublishTargetPaths(),
+						),
+					);
+				}
+				return true;
 			},
 		});
 

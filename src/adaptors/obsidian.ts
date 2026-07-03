@@ -27,37 +27,42 @@ export default class ObsidianAdaptor implements LoaderAdaptor {
 		this.app = app;
 	}
 
-	async getMarkdownFilesToUpload(): Promise<FilesToUpload> {
-		const files = this.vault.getMarkdownFiles();
-		const filesToPublish = [];
-		for (const file of files) {
-			try {
-				if (file.path.endsWith(".excalidraw")) {
-					continue;
-				}
+	// When set, only these vault paths are loaded/converted. Lets the plugin publish in
+	// bounded batches so a large vault doesn't convert every file to ADF at once (OOM).
+	publishTargetPaths: Set<string> | null = null;
 
-				const fileFM = this.metadataCache.getCache(file.path);
-				if (!fileFM) {
-					throw new Error("Missing File in Metadata Cache");
-				}
-				const frontMatter = fileFM.frontmatter;
-
-				if (
-					(file.path.startsWith(this.settings.folderToPublish) &&
-						(!frontMatter ||
-							frontMatter["connie-publish"] !== false)) ||
-					(frontMatter && frontMatter["connie-publish"] === true)
-				) {
-					filesToPublish.push(file);
-				}
-			} catch {
-				//ignore
-			}
+	private isPublishTarget(filePath: string): boolean {
+		if (filePath.endsWith(".excalidraw")) {
+			return false;
 		}
+		const fileFM = this.metadataCache.getCache(filePath);
+		if (!fileFM) {
+			return false;
+		}
+		const frontMatter = fileFM.frontmatter;
+		return (
+			(filePath.startsWith(this.settings.folderToPublish) &&
+				(!frontMatter || frontMatter["connie-publish"] !== false)) ||
+			(!!frontMatter && frontMatter["connie-publish"] === true)
+		);
+	}
+
+	// Cheap: returns publish-target paths without reading file contents (used to plan batches).
+	listPublishTargetPaths(): string[] {
+		return this.vault
+			.getMarkdownFiles()
+			.map((file) => file.path)
+			.filter((path) => this.isPublishTarget(path));
+	}
+
+	async getMarkdownFilesToUpload(): Promise<FilesToUpload> {
+		const filesToPublish = this.listPublishTargetPaths().filter(
+			(path) => !this.publishTargetPaths || this.publishTargetPaths.has(path),
+		);
 		const filesToUpload = [];
 
-		for (const file of filesToPublish) {
-			const markdownFile = await this.loadMarkdownFile(file.path);
+		for (const path of filesToPublish) {
+			const markdownFile = await this.loadMarkdownFile(path);
 			filesToUpload.push(markdownFile);
 		}
 
