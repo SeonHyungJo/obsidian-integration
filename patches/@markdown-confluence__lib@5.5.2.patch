@@ -1,0 +1,175 @@
+diff --git a/dist/Publisher.js b/dist/Publisher.js
+index 587ff0aa42a113e5f695ff2ef1fd8b0cf9908626..db158295fb802d10ad002896cac5e973c903d5db 100644
+--- a/dist/Publisher.js
++++ b/dist/Publisher.js
+@@ -4,6 +4,24 @@ import { adfEqual } from "./AdfEqual";
+ import { ensureAllFilesExistInConfluence } from "./TreeConfluence";
+ import { createFolderStructure as createLocalAdfTree } from "./TreeLocal";
+ import { isEqual } from "./isEqual";
++// fork patch: run file uploads in bounded batches instead of all at once (avoids OOM + API hammering).
++const PUBLISH_CONCURRENCY = 5;
++async function mapWithLimit(items, limit, fn) {
++    const results = new Array(items.length);
++    let cursor = 0;
++    async function worker() {
++        while (cursor < items.length) {
++            const index = cursor++;
++            results[index] = await fn(items[index]);
++        }
++    }
++    const workers = [];
++    for (let i = 0; i < Math.min(limit, items.length); i++) {
++        workers.push(worker());
++    }
++    await Promise.all(workers);
++    return results;
++}
+ export class Publisher {
+     confluenceClient;
+     adaptor;
+@@ -36,10 +54,7 @@ export class Publisher {
+         if (publishFilter) {
+             confluencePagesToPublish = confluencePagesToPublish.filter((file) => file.file.absoluteFilePath === publishFilter);
+         }
+-        const adrFileTasks = confluencePagesToPublish.map((file) => {
+-            return this.publishFile(file);
+-        });
+-        const adrFiles = await Promise.all(adrFileTasks);
++        const adrFiles = await mapWithLimit(confluencePagesToPublish, PUBLISH_CONCURRENCY, (file) => this.publishFile(file));
+         return adrFiles;
+     }
+     async publishFile(node) {
+@@ -64,8 +79,11 @@ export class Publisher {
+         }
+     }
+     async updatePageContent(ancestors, pageVersionNumber, existingPageData, adfFile, lastUpdatedBy) {
+-        if (lastUpdatedBy !== this.myAccountId) {
+-            throw new Error(`Page last updated by another user. Won't publish over their changes. MyAccountId: ${this.myAccountId}, Last Updated By: ${lastUpdatedBy}`);
++        // fork patch: allow opting out of the "someone else edited this" guard via `connie-force: true`
++        // frontmatter, so a page touched once by a teammate/bot isn't permanently unpublishable.
++        const forcePublish = adfFile.frontmatter?.["connie-force"] === true;
++        if (!forcePublish && lastUpdatedBy !== this.myAccountId) {
++            throw new Error(`Page last updated by another user. Won't publish over their changes. Add "connie-force: true" to force. Last updated by: ${lastUpdatedBy}`);
+         }
+         if (existingPageData.contentType !== adfFile.contentType) {
+             throw new Error(`Cannot convert between content types. From ${existingPageData.contentType} to ${adfFile.contentType}`);
+@@ -140,10 +158,6 @@ export class Publisher {
+         if (!adfEqual(existingPageData.adfContent, adfToUpload) ||
+             !isEqual(existingPageDetails, newPageDetails)) {
+             result.contentResult = "updated";
+-            console.log(`TESTING DIFF - ${adfFile.absoluteFilePath}`);
+-            const replacer = (_key, value) => typeof value === "undefined" ? null : value;
+-            console.log(JSON.stringify(existingPageData.adfContent, replacer));
+-            console.log(JSON.stringify(adfToUpload, replacer));
+             const updateContentDetails = {
+                 ...newPageDetails,
+                 id: adfFile.pageId,
+diff --git a/dist/TreeConfluence.js b/dist/TreeConfluence.js
+index 1afe77891789bc64635bddc1ba5fa1cb721e3373..a5903d8e1d6d5d3a626b3183d4d2392a67bcb6cc 100644
+--- a/dist/TreeConfluence.js
++++ b/dist/TreeConfluence.js
+@@ -1,6 +1,26 @@
+ import { doc, p } from "@atlaskit/adf-utils/builders";
+ import { prepareAdfToUpload } from "./AdfProcessing";
+ const blankPageAdf = JSON.stringify(doc(p("Page not published yet")));
++// fork patch: cap concurrent Confluence fetches so large vaults don't OOM the renderer.
++const FETCH_CONCURRENCY = 5;
++let __active = 0;
++const __waiters = [];
++async function withFetchLimit(fn) {
++    if (__active >= FETCH_CONCURRENCY) {
++        await new Promise((resolve) => __waiters.push(resolve));
++    }
++    __active++;
++    try {
++        return await fn();
++    }
++    finally {
++        __active--;
++        const next = __waiters.shift();
++        if (next) {
++            next();
++        }
++    }
++}
+ function flattenTree(node, ancestors = []) {
+     const nodes = [];
+     const { file, version, lastUpdatedBy, existingPageData, children } = node;
+@@ -43,7 +63,7 @@ async function createFileStructureInConfluence(settings, confluenceClient, adapt
+         pageUrl: "",
+     };
+     if (createPage) {
+-        const pageDetails = await ensurePageExists(confluenceClient, adaptor, node.file, spaceKey, parentPageId, topPageId);
++        const pageDetails = await withFetchLimit(() => ensurePageExists(confluenceClient, adaptor, node.file, spaceKey, parentPageId, topPageId));
+         file.pageId = pageDetails.id;
+         file.spaceKey = pageDetails.spaceKey;
+         version = pageDetails.version;
+@@ -93,25 +113,36 @@ async function ensurePageExists(confluenceClient, adaptor, file, spaceKey, paren
+             if (!contentById.space?.key) {
+                 throw new Error("Missing Space Key");
+             }
+-            await adaptor.updateMarkdownValues(file.absoluteFilePath, {
+-                publish: true,
+-                pageId: contentById.id,
+-            });
+-            return {
+-                id: contentById.id,
+-                title: file.pageTitle,
+-                version: contentById?.version?.number ?? 1,
+-                lastUpdatedBy: contentById?.version?.by?.accountId ?? "NO ACCOUNT ID",
+-                existingAdf: contentById?.body?.atlas_doc_format?.value,
+-                spaceKey: contentById.space.key,
+-                pageTitle: contentById.title,
+-                ancestors: contentById.ancestors?.map((ancestor) => ({
+-                    id: ancestor.id,
+-                })) ?? [],
+-                contentType: contentById.type,
+-            };
++            // fork patch: an archived/trashed page returns 200 here but rejects writes later with a
++            // confusing 403. Drop the stale id and fall through to recreate a current page instead.
++            if (contentById.status && contentById.status !== "current") {
++                await adaptor.updateMarkdownValues(file.absoluteFilePath, {
++                    pageId: undefined,
++                });
++            }
++            else {
++                await adaptor.updateMarkdownValues(file.absoluteFilePath, {
++                    publish: true,
++                    pageId: contentById.id,
++                });
++                return {
++                    id: contentById.id,
++                    title: file.pageTitle,
++                    version: contentById?.version?.number ?? 1,
++                    lastUpdatedBy: contentById?.version?.by?.accountId ?? "NO ACCOUNT ID",
++                    existingAdf: contentById?.body?.atlas_doc_format?.value,
++                    spaceKey: contentById.space.key,
++                    pageTitle: contentById.title,
++                    ancestors: contentById.ancestors?.map((ancestor) => ({
++                        id: ancestor.id,
++                    })) ?? [],
++                    contentType: contentById.type,
++                };
++            }
+         }
+         catch (error) {
++            // fork patch: the page was deleted in Confluence. Drop the stale id and fall through to
++            // recreate it, instead of disabling publish and aborting the entire run.
+             if (error instanceof Error &&
+                 "response" in error &&
+                 typeof error.response === "object" &&
+@@ -120,11 +151,12 @@ async function ensurePageExists(confluenceClient, adaptor, file, spaceKey, paren
+                 typeof error.response.status === "number" &&
+                 error.response.status === 404) {
+                 await adaptor.updateMarkdownValues(file.absoluteFilePath, {
+-                    publish: false,
+                     pageId: undefined,
+                 });
+             }
+-            throw error;
++            else {
++                throw error;
++            }
+         }
+     }
+     const searchParams = {

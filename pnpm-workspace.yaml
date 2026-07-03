@@ -1,0 +1,2 @@
+patchedDependencies:
+  '@markdown-confluence/lib@5.5.2': patches/@markdown-confluence__lib@5.5.2.patch

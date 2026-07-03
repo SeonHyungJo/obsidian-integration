@@ -4,7 +4,6 @@ import {
 	Publisher,
 	ConfluencePageConfig,
 	StaticSettingsLoader,
-	renderADFDoc,
 	MermaidRendererPlugin,
 	UploadAdfFileResult,
 } from "@markdown-confluence/lib";
@@ -51,7 +50,7 @@ export default class ConfluencePlugin extends Plugin {
 	adaptor!: ObsidianAdaptor;
 
 	activeLeafPath(workspace: Workspace) {
-		return workspace.getActiveViewOfType(MarkdownView)?.file.path;
+		return workspace.getActiveViewOfType(MarkdownView)?.file?.path;
 	}
 
 	async init() {
@@ -82,7 +81,7 @@ export default class ConfluencePlugin extends Plugin {
 			},
 			middlewares: {
 				onError(e) {
-					if ("response" in e && "data" in e.response) {
+					if ("response" in e && e.response && "data" in e.response) {
 						e.message =
 							typeof e.response.data === "string"
 								? e.response.data
@@ -236,38 +235,6 @@ export default class ConfluencePlugin extends Plugin {
 		});
 
 		this.addCommand({
-			id: "adf-to-markdown",
-			name: "ADF To Markdown",
-			callback: async () => {
-				console.log("HMMMM");
-				const json = JSON.parse(
-					'{"type":"doc","content":[{"type":"paragraph","content":[{"text":"Testing","type":"text"}]}],"version":1}',
-				);
-				console.log({ json });
-
-				const confluenceClient = new ObsidianConfluenceClient({
-					host: this.settings.confluenceBaseUrl,
-					authentication: {
-						basic: {
-							email: this.settings.atlassianUserName,
-							apiToken: this.settings.atlassianApiToken,
-						},
-					},
-				});
-				const testingPage =
-					await confluenceClient.content.getContentById({
-						id: "9732097",
-						expand: ["body.atlas_doc_format", "space"],
-					});
-				const adf = JSON.parse(
-					testingPage.body?.atlas_doc_format?.value ||
-						'{type: "doc", content:[]}',
-				);
-				renderADFDoc(adf);
-			},
-		});
-
-		this.addCommand({
 			id: "publish-current",
 			name: "Publish Current File to Confluence",
 			checkCallback: (checking: boolean) => {
@@ -305,7 +272,7 @@ export default class ConfluencePlugin extends Plugin {
 					}
 					return true;
 				}
-				return true;
+				return false;
 			},
 		});
 
@@ -346,7 +313,7 @@ export default class ConfluencePlugin extends Plugin {
 							});
 					}
 				}
-				return true;
+				return !this.isSyncing;
 			},
 		});
 
