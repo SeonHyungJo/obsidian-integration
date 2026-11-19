@@ -1,3 +1,4 @@
 patchedDependencies:
   '@markdown-confluence/lib@5.5.2': patches/@markdown-confluence__lib@5.5.2.patch
   '@markdown-confluence/mermaid-electron-renderer@5.5.2': patches/@markdown-confluence__mermaid-electron-renderer@5.5.2.patch
+  confluence.js@1.7.4: patches/confluence.js@1.7.4.patch

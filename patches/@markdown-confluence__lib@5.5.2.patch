@@ -1,3 +1,51 @@
+diff --git a/dist/MarkdownTransformer/media.js b/dist/MarkdownTransformer/media.js
+index fc48f12751f8b82e2cf9254dd58a92a0c0de999c..5c79446f74bca08abb0ba5bdc36822fde81c9473 100644
+--- a/dist/MarkdownTransformer/media.js
++++ b/dist/MarkdownTransformer/media.js
+@@ -1,5 +1,7 @@
+ function createRule() {
+-    const regx = /!\[[^\]]*\]\([^)]+\)|!\[\[.*\..*]]/g;
++    const regx = /!\[[^\]]*\]\([^)]+\)|!\[\[[^\]]*\.[^\]]*]]/g;
++    // fork patch: ignore image syntax inside `code spans` (it was turned into media and broke tables).
++    const maskCode = (s) => s.replace(/(`+)[\s\S]*?\1/g, (m) => "\0".repeat(m.length));
+     const validParentTokens = ["th_open", "td_open", "list_item_open"];
+     /**
+      * This function looks for strings that matches ![description](url) inside Inline-tokens.
+@@ -80,7 +82,7 @@ function createRule() {
+         };
+         let processedTokens = [];
+         const newTokens = State.tokens.reduce((tokens, token, i, arr) => {
+-            if (token.type === "inline" && regx.test(token.content)) {
++            if (token.type === "inline" && [...maskCode(token.content).matchAll(regx)].length) {
+                 const openingTokens = [];
+                 let cursor = i - 1;
+                 let previousToken = arr[cursor];
+@@ -103,18 +105,17 @@ function createRule() {
+                     .map((token) => new State.Token(token.type.replace("_open", "_close"), token.tag, -1))
+                     .reverse();
+                 // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+-                const matches = token.content.match(regx);
+-                let inlineContentStack = token.content;
+-                matches.forEach((match) => {
+-                    const start = inlineContentStack.indexOf(match);
+-                    const contentBefore = inlineContentStack.substr(0, start);
+-                    inlineContentStack = inlineContentStack.substr(start + match.length);
++                let last = 0;
++                for (const m of maskCode(token.content).matchAll(regx)) {
++                    const match = token.content.slice(m.index, m.index + m[0].length);
+                     subTree = [
+                         ...subTree,
+-                        ...createInlineTokens(contentBefore, openingTokens, closingTokens),
++                        ...createInlineTokens(token.content.slice(last, m.index), openingTokens, closingTokens),
+                         ...createMediaTokens(match),
+                     ];
+-                });
++                    last = m.index + m[0].length;
++                }
++                const inlineContentStack = token.content.slice(last);
+                 if (inlineContentStack.length) {
+                     subTree = [
+                         ...subTree,
 diff --git a/dist/Publisher.js b/dist/Publisher.js
 index 587ff0aa42a113e5f695ff2ef1fd8b0cf9908626..db158295fb802d10ad002896cac5e973c903d5db 100644
 --- a/dist/Publisher.js
