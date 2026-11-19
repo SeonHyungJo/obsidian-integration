@@ -1,6 +1,6 @@
 {
     "name": "obsidian-confluence",
-    "version": "5.5.5",
+    "version": "5.5.6",
     "description": "This library allows you to publish your notes to Confluence",
     "main": "main.js",
     "type": "module",
@@ -27,8 +27,11 @@
         "@typescript-eslint/eslint-plugin": "^5.29.0",
         "@typescript-eslint/parser": "^5.29.0",
         "builtin-modules": "^3.3.0",
+        "confluence.js": "^1.7.4",
         "esbuild": "^0.17.3",
+        "mime-types": "^2.1.35",
         "react": "^18.3.1",
+        "react-dom": "^18.3.1",
         "tslib": "^2.4.0",
         "typescript": "^4.7.4"
     }

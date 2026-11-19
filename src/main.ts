@@ -1,4 +1,15 @@
-import { Plugin, Notice, MarkdownView, Workspace, loadMermaid } from "obsidian";
+import {
+	Plugin,
+	Notice,
+	MarkdownView,
+	ItemView,
+	TFile,
+	Workspace,
+	FileSystemAdapter,
+	loadMermaid,
+} from "obsidian";
+import { execFile } from "child_process";
+import { homedir } from "os";
 import {
 	ConfluenceUploadSettings,
 	Publisher,
@@ -29,6 +40,8 @@ export interface ObsidianPluginSettings
 		| "neutral"
 		| "dark"
 		| "forest";
+	nodePath: string;
+	htmlConverterPath: string;
 }
 
 interface FailedFile {
@@ -51,6 +64,47 @@ export default class ConfluencePlugin extends Plugin {
 
 	activeLeafPath(workspace: Workspace) {
 		return workspace.getActiveViewOfType(MarkdownView)?.file?.path;
+	}
+
+	// HTML Viewer opens .html in an ItemView (not a FileView), so read `file` off the view
+	activeHtmlFile(workspace: Workspace): TFile | undefined {
+		const view = workspace.getActiveViewOfType(ItemView) as
+			| (ItemView & { file?: TFile | null })
+			| null;
+		const file = view?.file ?? workspace.getActiveFile();
+		return file?.extension === "html" ? file : undefined;
+	}
+
+	// The HTML is rendered to <title>.md + PNGs next to it by an external converter
+	// (headless Chrome), then the .md is published like any other note.
+	async doPublishHtml(file: TFile): Promise<UploadResults> {
+		const base = (this.app.vault.adapter as FileSystemAdapter).getBasePath();
+		const converter = this.settings.htmlConverterPath.replace(/^~/, homedir());
+		const notice = new Notice("Confluence: converting HTML to md…", 0);
+		let stdout: string;
+		try {
+			stdout = await new Promise<string>((resolve, reject) =>
+				execFile(
+					this.settings.nodePath,
+					[converter, `${base}/${file.path}`, `${base}/${file.parent?.path ?? ""}`, "--md"],
+					{ timeout: 120000 },
+					(err, out, errOut) =>
+						err ? reject(new Error(errOut || err.message)) : resolve(out),
+				),
+			);
+		} finally {
+			notice.hide();
+		}
+		const mdPath = stdout.match(/^✓ (.+\.md)$/m)?.[1]?.slice(base.length + 1);
+		if (!mdPath) {
+			throw new Error(`Converter did not report an .md file:\n${stdout}`);
+		}
+		// Wait for Obsidian to index the new note; the publisher reads its frontmatter from the cache
+		for (let i = 0; i < 50; i++) {
+			if (this.app.metadataCache.getCache(mdPath)?.frontmatter) break;
+			await new Promise((r) => setTimeout(r, 100));
+		}
+		return this.doPublishPaths([mdPath]);
 	}
 
 	async init() {
@@ -277,6 +331,21 @@ export default class ConfluencePlugin extends Plugin {
 		});
 
 		this.addCommand({
+			id: "publish-html",
+			name: "Publish Current HTML to Confluence (via md)",
+			checkCallback: (checking: boolean) => {
+				const file = this.activeHtmlFile(this.workspace);
+				if (this.isSyncing || !file) {
+					return false;
+				}
+				if (!checking) {
+					this.runPublish(() => this.doPublishHtml(file));
+				}
+				return true;
+			},
+		});
+
+		this.addCommand({
 			id: "publish-all",
 			name: "Publish All to Confluence",
 			checkCallback: (checking: boolean) => {
@@ -433,7 +502,12 @@ export default class ConfluencePlugin extends Plugin {
 		this.settings = Object.assign(
 			{},
 			ConfluenceUploadSettings.DEFAULT_SETTINGS,
-			{ mermaidTheme: "match-obsidian" },
+			{
+				mermaidTheme: "match-obsidian",
+				nodePath: "/opt/homebrew/bin/node",
+				htmlConverterPath:
+					"~/.claude/skills/visual-explainer/scripts/ve-confluence.mjs",
+			},
 			await this.loadData(),
 		);
 	}

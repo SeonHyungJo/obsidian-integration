@@ -120,5 +120,29 @@ export class ConfluenceSettingTab extends PluginSettingTab {
 					});
 				/* eslint-enable @typescript-eslint/naming-convention */
 			});
+
+		new Setting(containerEl)
+			.setName("Node path")
+			.setDesc("Node binary used to convert HTML to md")
+			.addText((text) =>
+				text
+					.setValue(this.plugin.settings.nodePath)
+					.onChange(async (value) => {
+						this.plugin.settings.nodePath = value;
+						await this.plugin.saveSettings();
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName("HTML converter script")
+			.setDesc("Writes <title>.md and PNGs next to the HTML (`<script> <page.html> <outDir> --md`)")
+			.addText((text) =>
+				text
+					.setValue(this.plugin.settings.htmlConverterPath)
+					.onChange(async (value) => {
+						this.plugin.settings.htmlConverterPath = value;
+						await this.plugin.saveSettings();
+					}),
+			);
 	}
 }
