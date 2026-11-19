@@ -104,7 +104,20 @@ export default class ConfluencePlugin extends Plugin {
 			if (this.app.metadataCache.getCache(mdPath)?.frontmatter) break;
 			await new Promise((r) => setTimeout(r, 100));
 		}
-		return this.doPublishPaths([mdPath]);
+		const results = await this.doPublishPaths([mdPath]);
+		if (!results.errorMessage && results.failedFiles.length === 0) {
+			// The .md and PNGs are disposable: a re-run regenerates them and the page is found again by title
+			const stem = mdPath.replace(/\.md$/, "");
+			const leftovers = this.app.vault
+				.getFiles()
+				.filter(
+					(f) =>
+						f.path === mdPath ||
+						(f.extension === "png" && f.path.startsWith(`${stem}-fig-`)),
+				);
+			for (const f of leftovers) await this.app.vault.trash(f, true);
+		}
+		return results;
 	}
 
 	async init() {
